@@ -239,6 +239,9 @@ echo ">>> Stripping dynamic libraries for $abi"
 find $python_install -type f -iname "*.so" -exec $STRIP --strip-unneeded {} \;
 
 echo ">>> Replacing host platform"
-sed -i -e "s/_PYTHON_HOST_PLATFORM=.*/_PYTHON_HOST_PLATFORM=android-$api_level-$abi/" $python_install/lib/python$python_version_short/config-$python_version_short/Makefile
+# 3.13+ names the config dir config-<ver>-<host triplet>, so locate the Makefile
+sysconfig_makefile=$(find $python_install/lib/python$python_version_short -maxdepth 2 -path "*/config-$python_version_short*/Makefile" | head -n 1)
+[ -n "$sysconfig_makefile" ] || fail "Makefile not found in $python_install"
+sed -i -e "s/_PYTHON_HOST_PLATFORM=.*/_PYTHON_HOST_PLATFORM=android-$api_level-$abi/" "$sysconfig_makefile"
 
 # the end!
