@@ -264,7 +264,7 @@ build_dep gdbm $gdbm_version \
 build_dep util-linux $util_linux_version \
     https://www.kernel.org/pub/linux/utils/util-linux/v${util_linux_version%.*}/util-linux-$util_linux_version.tar.xz \
     tar.xz install \
-    --disable-all-programs --enable-libuuid --disable-shared --enable-static \
+    --disable-all-programs --enable-libuuid --disable-shared --enable-static --disable-year2038 \
     --without-python --without-systemd --without-udev --without-ncurses \
     --without-tinfo --disable-nls --disable-bash-completion \
     --disable-asciidoc --disable-poman --disable-makeinstall-chown \
