@@ -166,7 +166,10 @@ cd $python_build_dir
 
 # apply patches
 echo ">>> Patching Python for $abi"
-patches="dynload_shlib lfs soname"
+patches="dynload_shlib lfs"
+if [ $python_version_int -le 312 ]; then
+    patches+=" soname"
+fi
 if [ $python_version_int -le 311 ]; then
     patches+=" sysroot_paths"
 fi
@@ -174,7 +177,11 @@ if [ $python_version_int -ge 311 ]; then
     patches+=" python_for_build_deps"
 fi
 if [ $python_version_int -ge 312 ]; then
-    patches+=" bldlibrary grp"
+    patches+=" grp"
+fi
+# soname/bldlibrary are already upstream in 3.13+
+if [ $python_version_int -eq 312 ]; then
+    patches+=" bldlibrary"
 fi
 for name in $patches; do
     patch -p1 -i $project_dir/patches/$name.patch
