@@ -12,6 +12,12 @@ libffi_version=3.4.4-2
 openssl_version=3.0.13-1
 sqlite_version=3.45.1-0
 
+# built from source (no prebuilt Android packages exist for these)
+ncurses_version=6.5
+readline_version=8.3
+gdbm_version=1.24
+util_linux_version=2.40.2
+
 os=android
 build=custom
 
@@ -187,6 +193,13 @@ for name in $patches; do
     patch -p1 -i $project_dir/patches/$name.patch
 done
 
+# 3.13+: sysconfig.get_platform() raises KeyError on 32-bit userlands running on 64-bit ARM
+# CPUs (uname machine "armv8l"), which breaks pip. Treat armv8l like armv7l.
+if [ $python_version_int -ge 313 ]; then
+    sed -i 's/^\( *\)"armv7l": "armeabi_v7a",$/&\n\1"armv8l": "armeabi_v7a",/' Lib/sysconfig/__init__.py
+    grep -q '"armv8l": "armeabi_v7a"' Lib/sysconfig/__init__.py || fail "armv8l sysconfig patch did not apply"
+fi
+
 # Add sysroot paths, otherwise Python 3.8's setup.py will think libz is unavailable.
 CFLAGS+=" -I$toolchain/sysroot/usr/include"
 LDFLAGS+=" -L$toolchain/sysroot/usr/lib/$host_triplet/$api_level"
@@ -196,6 +209,71 @@ LDFLAGS+=" -L$toolchain/sysroot/usr/lib/$host_triplet/$api_level"
 # version, otherwise we get linker errors like "Parser/myreadline.o: relocation R_386_GOTOFF
 # against preemptible symbol PyOS_InputHook cannot be used when making a shared object".
 export CCSHARED="-fPIC"
+
+# Dependencies built from source, installed into one shared prefix and linked statically
+# into the extension modules (curses, readline, gdbm/dbm, uuid).
+set -o pipefail
+deps_prefix=$project_dir/install/$os/$abi/deps
+rm -rf $deps_prefix
+mkdir -p $deps_prefix
+
+build_dep() {
+    local name=$1 version=$2 url=$3 ext=$4 install_targets=$5
+    shift 5
+    local tarball=$downloads/$name-$version.$ext
+    local src=$build_dir/$name-$version
+    echo ">>> Building $name $version for $abi"
+    [ -f "$tarball" ] || curl $curl_flags --retry 3 -o "$tarball" "$url"
+    rm -rf "$src"
+    tar xf "$tarball" -C "$build_dir"
+    (
+        cd "$src"
+        CFLAGS="$CFLAGS -fPIC" ./configure \
+            --host=$host_triplet --build=$(gcc -dumpmachine) --prefix="$deps_prefix" "$@"
+        make -j$CPU_COUNT
+        make $install_targets
+    ) 2>&1 | tee -a "$build_dir/$name-$version.build.log"
+}
+
+termux_terminfo=/data/data/com.termux/files/usr/share/terminfo
+build_dep ncurses $ncurses_version \
+    https://ftp.gnu.org/gnu/ncurses/ncurses-$ncurses_version.tar.gz tar.gz \
+    "install.libs install.includes" \
+    --with-build-cc=gcc --without-shared --with-normal --without-debug \
+    --without-cxx --without-cxx-binding --without-ada --without-progs \
+    --without-tests --without-manpages --enable-widec --enable-pc-files \
+    --with-pkg-config-libdir="$deps_prefix/lib/pkgconfig" \
+    --with-default-terminfo-dir=$termux_terminfo \
+    --with-terminfo-dirs=$termux_terminfo:/system/etc/terminfo \
+    --disable-stripping
+
+build_dep readline $readline_version \
+    https://ftp.gnu.org/gnu/readline/readline-$readline_version.tar.gz tar.gz install \
+    --disable-shared --enable-static --with-curses \
+    CPPFLAGS="-I$deps_prefix/include -I$deps_prefix/include/ncursesw" \
+    LDFLAGS="$LDFLAGS -L$deps_prefix/lib" \
+    bash_cv_wcwidth_broken=no bash_cv_func_sigsetjmp=present \
+    bash_cv_func_strcoll_broken=no bash_cv_func_ctype_nonascii=no \
+    bash_cv_have_mbstate_t=yes bash_cv_unusable_rtsigs=no bash_cv_getcwd_malloc=yes
+
+build_dep gdbm $gdbm_version \
+    https://ftp.gnu.org/gnu/gdbm/gdbm-$gdbm_version.tar.gz tar.gz install \
+    --disable-shared --enable-static --enable-libgdbm-compat \
+    --without-readline --disable-nls
+
+build_dep util-linux $util_linux_version \
+    https://www.kernel.org/pub/linux/utils/util-linux/v${util_linux_version%.*}/util-linux-$util_linux_version.tar.xz \
+    tar.xz install \
+    --disable-all-programs --enable-libuuid --disable-shared --enable-static \
+    --without-python --without-systemd --without-udev --without-ncurses \
+    --without-tinfo --disable-nls --disable-bash-completion \
+    --disable-asciidoc --disable-poman --disable-makeinstall-chown \
+    --disable-makeinstall-setuid
+
+export CPPFLAGS="${CPPFLAGS:-} -I$deps_prefix/include"
+LDFLAGS+=" -L$deps_prefix/lib"
+export PKG_CONFIG_LIBDIR="$deps_prefix/lib/pkgconfig:$PKG_CONFIG_LIBDIR"
+cd $python_build_dir
 
 # Override some tests.
 cat > config.site <<EOF
@@ -214,6 +292,14 @@ echo ">>> Configuring Python for $abi"
     BZIP2_LIBS="-L$bzip2_install/lib -lbz2" \
     LIBFFI_CFLAGS="-I$libffi_install/include" \
     LIBFFI_LIBS="-L$libffi_install/lib -lffi" \
+    LIBSQLITE3_CFLAGS="-I$sqlite_install/include" \
+    LIBSQLITE3_LIBS="-L$sqlite_install/lib -lsqlite3" \
+    CURSES_CFLAGS="-D_GNU_SOURCE -DNCURSES_WIDECHAR -I$deps_prefix/include/ncursesw" \
+    CURSES_LIBS="-L$deps_prefix/lib -lncursesw" \
+    PANEL_CFLAGS="-D_GNU_SOURCE -DNCURSES_WIDECHAR -I$deps_prefix/include/ncursesw" \
+    PANEL_LIBS="-L$deps_prefix/lib -lpanelw -lncursesw" \
+    LIBREADLINE_CFLAGS="-I$deps_prefix/include" \
+    LIBREADLINE_LIBS="-L$deps_prefix/lib -lreadline -lncursesw" \
     --host=$host_triplet \
     --build=$(./config.guess) \
     --with-build-python=yes \
@@ -224,9 +310,21 @@ echo ">>> Configuring Python for $abi"
     --without-ensurepip \
 	2>&1 | tee -a ../python-$python_version.config.log
 
+echo ">>> Checking required modules for $abi"
+for m in _sqlite3 _curses _curses_panel readline _uuid _gdbm _dbm _ssl _hashlib _ctypes zlib _bz2 _lzma; do
+    grep -q "checking for stdlib extension module $m... yes" ../python-$python_version.config.log \
+        || fail "stdlib module $m would not be built (see config log)"
+done
+
 echo ">>> Building Python for $abi"
 make all \
     2>&1 | tee -a ../python-$python_version.build.log
+
+if grep -q "^Failed to build these modules" ../python-$python_version.build.log; then
+    grep -A8 "^Failed to build these modules" ../python-$python_version.build.log
+    fail "some stdlib modules failed to build"
+fi
+grep -A4 "^The necessary bits" ../python-$python_version.build.log || true
 
 echo ">>> Installing Python for $abi"
 make install \
