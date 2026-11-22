@@ -1,0 +1,71 @@
+name: Build Python (armeabi-v7a / armv7l)
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "JSON list of Python versions"
+        default: '["3.13.7","3.13.9"]'
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(inputs.versions || '["3.13.7","3.13.9"]') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build-python must match the target minor version (--with-build-python=yes)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cache NDK and downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/ndk
+            downloads
+          key: ndk-r27-deps-${{ hashFiles('build.sh') }}
+
+      - name: Install host packages
+        run: sudo apt-get update && sudo apt-get install -y patch pkg-config unzip curl
+
+      - name: Build
+        run: |
+          chmod +x build.sh android-env.sh
+          ./build.sh ${{ matrix.python }} armeabi-v7a
+
+      - name: Package
+        run: |
+          tar -czf python-android-armv7l-${{ matrix.python }}.tar.gz \
+            install/android/armeabi-v7a/python-${{ matrix.python }} \
+            support
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-android-armv7l-${{ matrix.python }}
+          path: python-android-armv7l-${{ matrix.python }}.tar.gz
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.python }}
+          path: build/android/armeabi-v7a/*.log
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --generate-notes 2>/dev/null || true
+          gh release upload "${GITHUB_REF_NAME}" \
+            python-android-armv7l-${{ matrix.python }}.tar.gz --clobber
